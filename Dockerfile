@@ -14,7 +14,7 @@
 ##                               BUILD ARGS                                   ##
 ################################################################################
 # This build arg allows the specification of a custom Golang image.
-ARG GOLANG_IMAGE=golang:1.13.9
+ARG GOLANG_IMAGE=golang:1.15.3
 
 # The distroless image on which the CPI manager image is built.
 #
@@ -41,6 +41,7 @@ ARG GOPROXY
 WORKDIR /build
 COPY go.mod go.sum ./
 COPY cmd/ cmd/
+COPY pkg/ pkg/
 COPY Makefile ./Makefile
 ENV CGO_ENABLED=0
 ENV GOPROXY ${GOPROXY:-https://proxy.golang.org}

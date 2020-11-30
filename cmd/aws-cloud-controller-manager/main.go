@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -47,15 +48,21 @@ import (
 	"k8s.io/kubernetes/cmd/cloud-controller-manager/app"
 	"k8s.io/kubernetes/cmd/cloud-controller-manager/app/options"
 	"k8s.io/kubernetes/pkg/features" // add the kubernetes feature gates
-	utilflag "k8s.io/kubernetes/pkg/util/flag"
-	"k8s.io/legacy-cloud-providers/aws"
 	netutils "k8s.io/utils/net"
 
 	cloudprovider "k8s.io/cloud-provider"
+	awsv1 "k8s.io/cloud-provider-aws/pkg/providers/v1"
+	awsv2 "k8s.io/cloud-provider-aws/pkg/providers/v2"
+
+	cloudnodecontroller "k8s.io/cloud-provider/controllers/node"
+	cloudnodelifecyclecontroller "k8s.io/cloud-provider/controllers/nodelifecycle"
+	routecontroller "k8s.io/cloud-provider/controllers/route"
+	servicecontroller "k8s.io/cloud-provider/controllers/service"
 	cloudcontrollerconfig "k8s.io/kubernetes/cmd/cloud-controller-manager/app/config"
-	cloudcontrollers "k8s.io/kubernetes/pkg/controller/cloud"
-	routecontroller "k8s.io/kubernetes/pkg/controller/route"
-	servicecontroller "k8s.io/kubernetes/pkg/controller/service"
+)
+
+const (
+	enableAlphaV2EnvVar = "ENABLE_ALPHA_V2"
 )
 
 var version string
@@ -83,11 +90,24 @@ func main() {
 				os.Exit(0)
 			}
 
-			// Hard code aws cloud provider
+			// Default to the v1 provider if not set
 			cloudProviderFlag := cmd.Flags().Lookup("cloud-provider")
-			cloudProviderFlag.Value.Set(aws.ProviderName)
+			if cloudProviderFlag.Value.String() == "" {
+				cloudProviderFlag.Value.Set(awsv1.ProviderName)
+			}
 
-			utilflag.PrintFlags(cmd.Flags())
+			cloudProvider := cloudProviderFlag.Value.String()
+			if cloudProvider != awsv1.ProviderName && cloudProvider != awsv2.ProviderName {
+				klog.Fatalf("unknown cloud provider %s, only 'aws' and 'aws/v2' are supported", cloudProvider)
+			}
+
+			if cloudProvider == awsv2.ProviderName {
+				if v2Enabled := os.Getenv(enableAlphaV2EnvVar); v2Enabled != "true" {
+					klog.Fatalf("aws/v2 cloud provider requires environment variable ENABLE_ALPHA_V2=true to be set")
+				}
+			}
+
+			printFlags(cmd.Flags())
 
 			c, err := s.Config(KnownControllers(), ControllersDisabledByDefault.List())
 			if err != nil {
@@ -143,7 +163,7 @@ func newControllerInitializers() map[string]initFunc {
 
 func startCloudNodeController(ctx *cloudcontrollerconfig.CompletedConfig, cloud cloudprovider.Interface, stopCh <-chan struct{}) (http.Handler, bool, error) {
 	// Start the CloudNodeController
-	nodeController, err := cloudcontrollers.NewCloudNodeController(
+	nodeController, err := cloudnodecontroller.NewCloudNodeController(
 		ctx.SharedInformers.Core().V1().Nodes(),
 		// cloud node controller uses existing cluster role from node-controller
 		ctx.ClientBuilder.ClientOrDie("node-controller"),
@@ -162,7 +182,7 @@ func startCloudNodeController(ctx *cloudcontrollerconfig.CompletedConfig, cloud 
 
 func startCloudNodeLifecycleController(ctx *cloudcontrollerconfig.CompletedConfig, cloud cloudprovider.Interface, stopCh <-chan struct{}) (http.Handler, bool, error) {
 	// Start the cloudNodeLifecycleController
-	cloudNodeLifecycleController, err := cloudcontrollers.NewCloudNodeLifecycleController(
+	cloudNodeLifecycleController, err := cloudnodelifecyclecontroller.NewCloudNodeLifecycleController(
 		ctx.SharedInformers.Core().V1().Nodes(),
 		// cloud node lifecycle controller uses existing cluster role from node-controller
 		ctx.ClientBuilder.ClientOrDie("node-controller"),
@@ -187,6 +207,7 @@ func startServiceController(ctx *cloudcontrollerconfig.CompletedConfig, cloud cl
 		ctx.SharedInformers.Core().V1().Services(),
 		ctx.SharedInformers.Core().V1().Nodes(),
 		ctx.ComponentConfig.KubeCloudShared.ClusterName,
+		utilfeature.DefaultFeatureGate,
 	)
 	if err != nil {
 		// This error shouldn't fail. It lives like this as a legacy.
@@ -262,4 +283,11 @@ func processCIDRs(cidrsList string) ([]*net.IPNet, bool, error) {
 	dualstack, _ := netutils.IsDualStackCIDRs(cidrs)
 
 	return cidrs, dualstack, nil
+}
+
+// PrintFlags logs the flags in the flagset
+func printFlags(flags *pflag.FlagSet) {
+	flags.VisitAll(func(flag *pflag.Flag) {
+		klog.V(1).Infof("FLAG: --%s=%q", flag.Name, flag.Value)
+	})
 }
